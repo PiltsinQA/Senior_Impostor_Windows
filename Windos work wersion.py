@@ -291,14 +291,15 @@ class InterviewAssistantWin(QMainWindow):
             content.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_b64}"}})
         try:
             r = requests.post(
-                "https://openrouter.ai/api/v1/chat/completions",
+                "https://openrouter.ai/api/v1/chat/completions",  # ← ИСПРАВЛЕНО: убраны пробелы
                 headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
                 json={
                     "model": "google/gemini-2.0-flash-001",
                     "messages": [{"role": "system", "content": self.prompt_edit.toPlainText()},
                                  {"role": "user", "content": content}]
                 },
-                timeout=60
+                timeout=60,
+                proxies={"http": None, "https": None}  # ← ИСПРАВЛЕНО: отключены системные прокси
             )
             if r.status_code == 200:
                 self.signals.text.emit(r.json()["choices"][0]["message"]["content"])
