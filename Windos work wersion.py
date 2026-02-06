@@ -136,9 +136,17 @@ class InterviewAssistantWin(QMainWindow):
         s_layout.addWidget(QLabel("OpenRouter API Key"))
         self.token_input = QLineEdit()
         s_layout.addWidget(self.token_input)
+
         s_layout.addWidget(QLabel("Whisper Model"))
         self.whisper_input = QLineEdit("base")
         s_layout.addWidget(self.whisper_input)
+
+        # --- НОВОЕ: Интервал авто-режима ---
+        s_layout.addWidget(QLabel("Auto Interval (sec)"))
+        self.auto_interval_input = QLineEdit("15")
+        s_layout.addWidget(self.auto_interval_input)
+        # -----------------------------------
+
         s_layout.addWidget(QLabel("Prompt"))
         self.prompt_edit = QTextEdit(DEFAULT_PROMPT)
         s_layout.addWidget(self.prompt_edit)
@@ -167,7 +175,8 @@ class InterviewAssistantWin(QMainWindow):
             json.dump({
                 "token": self.token_input.text(),
                 "prompt": self.prompt_edit.toPlainText(),
-                "whisper": self.whisper_input.text()
+                "whisper": self.whisper_input.text(),
+                "auto_interval": self.auto_interval_input.text()  # Сохраняем интервал
             }, f, ensure_ascii=False)
         self.signals.log.emit("✅ Настройки сохранены")
 
@@ -178,6 +187,7 @@ class InterviewAssistantWin(QMainWindow):
                 self.token_input.setText(d.get("token", ""))
                 self.prompt_edit.setText(d.get("prompt", DEFAULT_PROMPT))
                 self.whisper_input.setText(d.get("whisper", "base"))
+                self.auto_interval_input.setText(d.get("auto_interval", "15"))  # Загружаем интервал
 
     def toggle_mic(self):
         if self.auto_mode: self.stop_auto()
@@ -194,12 +204,20 @@ class InterviewAssistantWin(QMainWindow):
     def toggle_auto_mode(self):
         if self.is_recording: self.is_recording = False
         if self.btn_auto.isChecked():
+            # Получаем интервал из настроек
+            try:
+                interval = int(self.auto_interval_input.text())
+                if interval < 1: interval = 1
+            except:
+                interval = 15
+
             self.auto_mode = True
             self.audio_frames = []
-            self.auto_seconds_left = 15
+            self.auto_seconds_left = interval
             self.signals.status.emit("▶️ АВТО")
             threading.Thread(target=self.record_loop, daemon=True).start()
-            self.auto_timer.start(15000)
+
+            self.auto_timer.start(interval * 1000)  # Интервал в мс
             self.countdown_timer.start(1000)
         else:
             self.stop_auto()
@@ -214,7 +232,11 @@ class InterviewAssistantWin(QMainWindow):
 
     def update_countdown(self):
         self.auto_seconds_left -= 1
-        if self.auto_seconds_left < 0: self.auto_seconds_left = 14
+        if self.auto_seconds_left < 0:
+            try:
+                self.auto_seconds_left = int(self.auto_interval_input.text()) - 1
+            except:
+                self.auto_seconds_left = 14
         self.signals.btn_auto_text.emit(f"🤖 АВТО ({self.auto_seconds_left}s)")
 
     def auto_process_cycle(self):
