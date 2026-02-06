@@ -1,0 +1,689 @@
+сделай что бы можно было включить только одну из функций с звуком либо авто либо ручное
+
+так же добавь в настройки поле для ввода токена от гигачата
+
+как только пользователь его вводит и нажимает сохранить все данные сохраняются и при перезагрузке то же есть
+
+так же должна быть кнопка стоп - останавливает работу с текущим запросом
+
+кнопка очистки - очищает все сообщения
+
+
+
+все остальное работает правильно не трогай и не удаляй функционал
+
+пришли код полностью
+
+
+
+
+
+import sys
+
+import threading
+
+import sounddevice as sd
+
+import numpy as np
+
+import base64
+
+import pyperclip
+
+import json
+
+import os
+
+from io import BytesIO
+
+from PIL import ImageGrab
+
+from faster_whisper import WhisperModel
+
+from gigachat import GigaChat
+
+from PyQt6.QtWidgets import (QApplication, QLabel, QMainWindow, QTabWidget,
+
+                             QWidget, QVBoxLayout, QHBoxLayout, QTextEdit,
+
+                             QLineEdit, QPushButton, QSlider)
+
+from PyQt6.QtCore import Qt, QTimer
+
+
+
+CONFIG_FILE = "settings_win.json"
+
+DEFAULT_PROMPT = "Ты — Senior QA и математик. Решай задачи пошагово, отвечай четко."
+
+
+
+sd.default.latency = 'low'
+
+sd.default.blocksize = 1024
+
+
+
+class InterviewAssistantWin(QMainWindow):
+
+    def __init__(self):
+
+        super().__init__()
+
+        self.setWindowTitle("Interview Assistant")
+
+        self.resize(450, 650)
+
+
+
+        # ------------------ FLAGS ------------------
+
+        self.is_recording = False
+
+        self.auto_mode = False
+
+        self.stop_flag = False
+
+        self.audio_frames = []
+
+        self.fs = 16000
+
+        self.history = []
+
+        self.history_index = -1
+
+        self.whisper_model = None
+
+        self.current_whisper_size = ""
+
+
+
+        # ------------------ TIMERS ------------------
+
+        self.auto_timer = QTimer()
+
+        self.auto_timer.timeout.connect(self.auto_process_cycle)
+
+        self.countdown_timer = QTimer()
+
+        self.countdown_timer.timeout.connect(self.update_countdown)
+
+        self.auto_seconds_left = 0
+
+
+
+        # ------------------ UI ------------------
+
+        self.init_ui()
+
+        self.load_settings()
+
+
+
+    # ================= UI =================
+
+    def init_ui(self):
+
+        self.tabs = QTabWidget(self)
+
+        self.setCentralWidget(self.tabs)
+
+
+
+        # --- Chat Tab ---
+
+        self.tab_chat = QWidget()
+
+        layout = QVBoxLayout()
+
+
+
+        self.status_indicator = QLabel("⚪ ГОТОВ")
+
+        self.nav_label = QLabel("0 / 0")
+
+
+
+        top_bar = QHBoxLayout()
+
+        top_bar.addWidget(self.status_indicator)
+
+        top_bar.addStretch()
+
+        top_bar.addWidget(self.nav_label)
+
+        layout.addLayout(top_bar)
+
+
+
+        self.label = QTextEdit()
+
+        self.label.setReadOnly(True)
+
+        layout.addWidget(self.label)
+
+
+
+        self.log_output = QTextEdit()
+
+        self.log_output.setReadOnly(True)
+
+        self.log_output.setFixedHeight(80)
+
+        layout.addWidget(self.log_output)
+
+
+
+        ctrl_layout = QHBoxLayout()
+
+        self.btn_mic = QPushButton("🎙 МИКРОФОН")
+
+        self.btn_mic.setCheckable(True)
+
+        self.btn_mic.clicked.connect(self.toggle_mic)
+
+        ctrl_layout.addWidget(self.btn_mic)
+
+
+
+        self.btn_auto = QPushButton("🤖 АВТО")
+
+        self.btn_auto.setCheckable(True)
+
+        self.btn_auto.clicked.connect(self.toggle_auto_mode)
+
+        ctrl_layout.addWidget(self.btn_auto)
+
+
+
+        btn_scr = QPushButton("📸 SCREEN")
+
+        btn_scr.clicked.connect(self.take_screenshot)
+
+        ctrl_layout.addWidget(btn_scr)
+
+
+
+        layout.addLayout(ctrl_layout)
+
+
+
+        bottom_layout = QHBoxLayout()
+
+        self.input_field = QLineEdit()
+
+        self.input_field.setPlaceholderText("Вопрос вручную...")
+
+        self.input_field.returnPressed.connect(self.send_manual_text)
+
+        bottom_layout.addWidget(self.input_field)
+
+
+
+        btn_clear = QPushButton("🗑 Очистить")
+
+        btn_clear.clicked.connect(self.clear_history)
+
+        bottom_layout.addWidget(btn_clear)
+
+
+
+        btn_stop = QPushButton("⏹ СТОП")
+
+        btn_stop.clicked.connect(self.stop_current_process)
+
+        bottom_layout.addWidget(btn_stop)
+
+
+
+        layout.addLayout(bottom_layout)
+
+
+
+        self.tab_chat.setLayout(layout)
+
+        self.tabs.addTab(self.tab_chat, "Чат")
+
+
+
+        # --- Settings Tab ---
+
+        self.tab_settings = QWidget()
+
+        s_layout = QVBoxLayout()
+
+
+
+        s_layout.addWidget(QLabel("<b>GIGACHAT TOKEN</b>"))
+
+        self.giga_token_input = QLineEdit()
+
+        s_layout.addWidget(self.giga_token_input)
+
+
+
+        self.whisper_name_input = QLineEdit()
+
+        self.whisper_name_input.setPlaceholderText("base, tiny, small...")
+
+        s_layout.addWidget(QLabel("Whisper Model:"))
+
+        s_layout.addWidget(self.whisper_name_input)
+
+
+
+        s_layout.addWidget(QLabel("System Prompt:"))
+
+        self.prompt_edit = QTextEdit()
+
+        s_layout.addWidget(self.prompt_edit)
+
+
+
+        self.btn_save = QPushButton("💾 СОХРАНИТЬ НАСТРОЙКИ")
+
+        self.btn_save.clicked.connect(self.save_settings)
+
+        s_layout.addWidget(self.btn_save)
+
+
+
+        self.tab_settings.setLayout(s_layout)
+
+        self.tabs.addTab(self.tab_settings, "⚙️")
+
+
+
+    # ================= Settings =================
+
+    def save_settings(self):
+
+        data = {
+
+            "prompt": self.prompt_edit.toPlainText(),
+
+            "giga_token": self.giga_token_input.text().strip(),
+
+            "whisper_model": self.whisper_name_input.text().strip()
+
+        }
+
+        with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+
+            json.dump(data, f, ensure_ascii=False, indent=4)
+
+        self.add_log("✅ Настройки сохранены")
+
+
+
+    def load_settings(self):
+
+        if os.path.exists(CONFIG_FILE):
+
+            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+
+                data = json.load(f)
+
+                self.prompt_edit.setText(data.get("prompt", DEFAULT_PROMPT))
+
+                self.giga_token_input.setText(data.get("giga_token", ""))
+
+                self.whisper_name_input.setText(data.get("whisper_model", "base"))
+
+
+
+    # ================= Log =================
+
+    def add_log(self, message):
+
+        self.log_output.append(message)
+
+        self.log_output.verticalScrollBar().setValue(self.log_output.verticalScrollBar().maximum())
+
+
+
+    # ================= WHISPER =================
+
+    def get_whisper(self):
+
+        model_name = self.whisper_name_input.text().strip() or "base"
+
+        if self.whisper_model is None or self.current_whisper_size != model_name:
+
+            self.add_log(f"⌛ Загрузка Whisper {model_name}...")
+
+            self.whisper_model = WhisperModel(model_name, device="cpu", compute_type="int8")
+
+            self.current_whisper_size = model_name
+
+        return self.whisper_model
+
+
+
+    # ================= AUDIO =================
+
+    def toggle_mic(self):
+
+        if self.auto_mode:
+
+            self.btn_auto.setChecked(False)
+
+            self.auto_mode = False
+
+            self.auto_timer.stop()
+
+            self.countdown_timer.stop()
+
+            self.add_log("⚠️ Auto отключен, чтобы включить микрофон")
+
+
+
+        if not self.is_recording:
+
+            self.audio_frames = []
+
+            self.is_recording = True
+
+            self.stop_flag = False
+
+            self.status_indicator.setText("🔴 ЗАПИСЬ")
+
+            threading.Thread(target=self.record_loop, daemon=True).start()
+
+        else:
+
+            self.is_recording = False
+
+            self.status_indicator.setText("⌛ Обработка...")
+
+            threading.Thread(target=self.process_audio_manual, daemon=True).start()
+
+
+
+    def toggle_auto_mode(self):
+
+        if self.is_recording:
+
+            self.btn_mic.setChecked(False)
+
+            self.is_recording = False
+
+            self.add_log("⚠️ Микрофон отключен, чтобы включить Auto")
+
+
+
+        self.auto_mode = self.btn_auto.isChecked()
+
+        if self.auto_mode:
+
+            self.audio_frames = []
+
+            self.stop_flag = False
+
+            self.auto_seconds_left = 15
+
+            self.status_indicator.setText("▶️ Auto включен")
+
+            threading.Thread(target=self.record_loop, daemon=True).start()
+
+            self.auto_timer.start(15000)
+
+            self.countdown_timer.start(1000)
+
+        else:
+
+            self.auto_timer.stop()
+
+            self.countdown_timer.stop()
+
+            self.status_indicator.setText("⚪ ГОТОВ")
+
+
+
+    def update_countdown(self):
+
+        if self.auto_mode:
+
+            self.auto_seconds_left -= 1
+
+            if self.auto_seconds_left >= 0:
+
+                self.btn_auto.setText(f"🤖 АВТО: {self.auto_seconds_left}s")
+
+
+
+    def auto_process_cycle(self):
+
+        self.auto_seconds_left = 15
+
+        if self.audio_frames:
+
+            frames = list(self.audio_frames)
+
+            self.audio_frames = []
+
+            threading.Thread(target=self.process_audio_silent, args=(frames,), daemon=True).start()
+
+
+
+    def record_loop(self):
+
+        try:
+
+            def audio_callback(indata, frames, time_info, status):
+
+                if self.stop_flag:
+
+                    raise sd.CallbackStop()
+
+                if self.is_recording or self.auto_mode:
+
+                    self.audio_frames.append(indata.copy())
+
+
+
+            with sd.InputStream(samplerate=self.fs, channels=1, dtype="float32", blocksize=1024,
+
+                                callback=audio_callback):
+
+                while (self.is_recording or self.auto_mode) and not self.stop_flag:
+
+                    sd.sleep(50)
+
+        except Exception as e:
+
+            self.add_log(f"❌ Audio Error: {e}")
+
+
+
+    def process_audio_manual(self):
+
+        if self.audio_frames:
+
+            frames = np.concatenate(self.audio_frames).flatten()
+
+            model = self.get_whisper()
+
+            segments, _ = model.transcribe(frames, language="ru")
+
+            text = " ".join([s.text for s in segments]).strip()
+
+            if text:
+
+                self.add_log(f"✅ Распознано: {text}")
+
+                self.ask_giga(text)
+
+        self.status_indicator.setText("⚪ ГОТОВ")
+
+        self.btn_mic.setChecked(False)
+
+
+
+    def process_audio_silent(self, frames):
+
+        try:
+
+            audio_data = np.concatenate(frames).flatten()
+
+            model = self.get_whisper()
+
+            segments, _ = model.transcribe(audio_data, language="ru")
+
+            text = " ".join([s.text for s in segments]).strip()
+
+            if text and not self.stop_flag:
+
+                self.add_log(f"✅ Auto Распознано: {text[:30]}...")
+
+                self.ask_giga(text)
+
+        except Exception as e:
+
+            self.add_log(f"❌ Whisper Auto Error: {e}")
+
+
+
+    # ================= GIGACHAT =================
+
+    def ask_giga(self, text, image_b64=None):
+
+        if self.stop_flag: return
+
+        token = self.giga_token_input.text().strip()
+
+        if not token: return
+
+        try:
+
+            with GigaChat(credentials=token, verify_ssl_certs=False) as giga:
+
+                attachments = []
+
+                if image_b64:
+
+                    uploaded = giga.upload_file(("t.jpg", base64.b64decode(image_b64), "image/jpeg"))
+
+                    f_id = getattr(uploaded, 'id_', getattr(uploaded, 'file_id', None))
+
+                    if f_id:
+
+                        attachments = [f_id]
+
+
+
+                res = giga.chat({"model": "GigaChat-Max", "messages": [
+
+                    {"role": "system", "content": self.prompt_edit.toPlainText()},
+
+                    {"role": "user", "content": text, "attachments": attachments}
+
+                ]})
+
+                answer = res.choices[0].message.content
+
+                self.history.append(answer)
+
+                self.history_index = len(self.history) - 1
+
+                self.display_history_item()
+
+        except Exception as e:
+
+            self.add_log(f"❌ GigaChat Error")
+
+
+
+    def display_history_item(self):
+
+        if self.history_index != -1:
+
+            item = self.history[self.history_index]
+
+            self.label.setHtml(item.replace('\n', '<br>'))
+
+            pyperclip.copy(item)
+
+            self.nav_label.setText(f"{self.history_index + 1} / {len(self.history)}")
+
+
+
+    # ================= Utils =================
+
+    def take_screenshot(self):
+
+        try:
+
+            screenshot = ImageGrab.grab()
+
+            buf = BytesIO()
+
+            screenshot.save(buf, format="JPEG")
+
+            threading.Thread(target=self.ask_giga,
+
+                             args=("Реши задачу.", base64.b64encode(buf.getvalue()).decode('utf-8')),
+
+                             daemon=True).start()
+
+        except:
+
+            pass
+
+
+
+    def clear_history(self):
+
+        self.history = []
+
+        self.history_index = -1
+
+        self.label.clear()
+
+        self.nav_label.setText("0 / 0")
+
+        self.add_log("🗑 История очищена")
+
+
+
+    def stop_current_process(self):
+
+        self.stop_flag = True
+
+        self.is_recording = False
+
+        self.auto_mode = False
+
+        self.status_indicator.setText("⏹ СТОП")
+
+        self.btn_mic.setChecked(False)
+
+        self.btn_auto.setChecked(False)
+
+        self.add_log("⏹ Процесс остановлен")
+
+
+
+    def send_manual_text(self):
+
+        t = self.input_field.text()
+
+        if t:
+
+            self.input_field.clear()
+
+            threading.Thread(target=self.ask_giga, args=(t,), daemon=True).start()
+
+
+
+
+
+if __name__ == "__main__":
+
+    app = QApplication(sys.argv)
+
+    win = InterviewAssistantWin()
+
+    win.show()
+
+    sys.exit(app.exec())
